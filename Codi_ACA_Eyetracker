@@ -1,0 +1,479 @@
+ %PROPOSTA DE CODI PER AVALUAR LA RELACIÓ AC/A AMB EL EYETRACKER%
+ %TFM CLAUDIA B.MORANCHO PUJOL%
+ %FACULTAT D'ÒPTICA I OPTOMETRIA DE TERRASSA, UNIVERSITAT POLITÈCNICA DE CATALUNYA%
+ %2020%
+ 
+ %% STEP 1 Config parametes
+prompt = {'Subject ID','Subject''s Name','Age','Correction(y/n)','break point vergence in Prism Bar','recovery point vergence in Prims bar', 'break point in Phoropter', 'recovery point in Phoropter','Refraction RE(sph,cyl,Ax)','Refraction LE(sph,cyl,Ax)','Base (BN/BT)'};
+dlg_title = 'FV';
+num_lines = 1;
+def = {'T','','','','','','','','0,0,0','0,0,0',''}; % default values
+answer = inputdlg(prompt, dlg_title, num_lines, def);  % read in parameters from GUI
+
+r = struct(); % store results in this struct variable
+r.runStart = datestr(now);
+r.sID = char(answer(1,1));
+r.sName = char(answer(2,1));
+r.age = str2double(char(answer(3,1)));
+r.correction = char(answer(4,1));
+r.breakpointvergencePrismBar = str2double(char(answer(5,1)));
+r.recoverypointvergencePrismBar = str2double(char(answer(6,1)));
+r.breakpointvergencePhoropter = str2double(char(answer(7,1)));
+r.recoverypointvergencePhoropter = str2double(char(answer(8,1)));
+r.refractionRE = char(answer(9,1));
+r.refractionLE = char(answer(10,1));
+r.baseTested = char(answer(11,1));
+
+% Convert the input base to a flag
+if strcmpi(r.baseTested, 'BN')
+    base = 0;
+elseif strcmpi(r.baseTested, 'BT')
+    base = 1;
+else % double check
+    base = input('Quina base vols mesurar? (0:BN  |  1:BT).... ');
+end
+
+% generate unique filename to save data without over-writing existing file
+testID = [r.sID, 'step', r.baseTested];
+n = 1;
+while exist([cd '\Results\' testID '.mat'],'file') ~= 0 % if a file with this name already exists, generate a new number for this subject ID
+    n = n + 1;
+    testID = [r.sID, 'step', r.baseTested, num2str(n)]; % modify sName if subject already exists
+end
+if exist('Results','dir')~=7
+    mkdir Results;
+end
+
+dataFile = [cd '\Results\' sprintf('%s', testID) '.mat']; % file path to Mat files
+edfFile = sprintf('%s', testID);
+
+%% STEP 2 Set some (usually) fixed experimental parameters
+testEyelink         = true;     % true==use eyeLink functions
+r.distEye2ScrnCm    = 40;        % distance eye-screen in centimeters
+r.crossSmallSideDeg = 0.1;       % horizontal size of a vertical rectangle stimulus in degrees (CROSS)
+r.crossLargeSideDeg = 1.5;       % vertical size of a vertical rectangle stimulus in degrees (CROSS)
+
+r.disparitiesPD     = [0 1 2 4 6 8 10 12 14 16 18 20 25 30 35 40 45]; % tested disparities in PD. [Comprova que siguin les mateixes que la barra de prismes que utilitzis]
+if base == 0 % Negative disparities if we are measuring divergence fusional ranges
+    r.disparitiesPD = -r.disparitiesPD;
+end
+r.disparitiesDeg    = atand(r.disparitiesPD/100); % tested disparities in degrees
+r.repetitions       = 3; % number of repetitions
+r.timeEachDisparity = 2; % in seconds
+
+%% STEP 3 Set some PTB parameters
+backgroundCol = 0; % white=1 color for screen background, range 0-1
+% gammaVals =[2.2 2.2 2.2]; % gamma for this test display
+stereoMode = 10; % 0=mono; 1&11=shutter; 2&3=vertical interleave; 4&5=horizontal interlave; 6-9=anaglyph; 10=dual display
+scrnNum = 1; % Assign left-eye view
+slaveScreen = 2; % Tell PsychImaging that the 2nd window for output of the right-eye view should be opened on 'slaveScreen'
+KbName('UnifyKeyNames'); % fix to process kepresses on Mac/PC/Linux
+escapeKey = KbName('ESCAPE'); % save and quit with Escape
+spaceKey = KbName('space');
+enter = KbName('return');
+upArrow = KbName('UpArrow'); downArrow = KbName('DownArrow'); rightArrow = KbName('RightArrow'); leftArrow = KbName('LeftArrow');
+
+%% STEP 4 PsychToolbox initiation
+% Here we call some default settings for setting up Psychtoolbox
+PsychDefaultSetup(2);
+% Screen('Preference', 'SkipSyncTests', 1); % [Prova si funciona sense comentar aquesta l�nia]
+
+% Open double-buffered onscreen window with the requested stereo mode, setup imaging pipeline for additional on-the-fly processing:
+% Prepare pipeline for configuration. This marks the start of a list of requirements/tasks to be met/executed in the pipeline:
+PsychImaging('PrepareConfiguration');
+PsychImaging('AddTask', 'General', 'DualWindowStereo', slaveScreen);
+PsychImaging('AddTask', 'FinalFormatting', 'DisplayColorCorrection', 'SimpleGamma'); % enable gamma correction
+
+% Open an on screen window
+[window, winRect] = PsychImaging('OpenWindow', scrnNum, backgroundCol, [], [], 2, stereoMode);  % open experimental window with required parameters
+
+% Get the size of the on screen window
+[width, height] = Screen('DisplaySize', scrnNum);% return in millimeters units
+[screenXpixels, screenYpixels] = Screen('WindowSize', window);
+
+% Get the center coordinate of the window
+[xcenter, ycenter] = RectCenter(window);
+
+% Set up alpha-blending for smooth (anti-aliased) lines
+Screen('BlendFunction', window, 'GL_SRC_ALPHA', 'GL_ONE_MINUS_SRC_ALPHA');
+
+% Query the frame duration
+ifi = Screen('GetFlipInterval', window);
+frameRate = Screen('FrameRate', window); % screen timing parameters
+
+% Set font characteristics for instructions to observer
+Screen(window,'TextSize',30); % set font size
+Screen(window,'TextFont','Arial'); % set font type
+
+%% STEP 5 Pixels to degrees of visual angle calculations
+oneDegInCm = tand(1)*r.distEye2ScrnCm;
+pixPerCm = screenXpixels/(width*0.1); % conversion Pixels to Cm. Number of pixels in 1 cm (pix/cm)
+oneDegInPix = oneDegInCm*pixPerCm; % this is pix/deg
+onePixInDeg = 1/oneDegInPix; % this is deg/pix
+
+r.pixPerDeg = oneDegInPix;
+r.disparitiesPix = r.disparitiesDeg*oneDegInPix; % tested disparities in pixels
+
+%% STEP 6 Initialize stimuli (cross for centering and fixation target)
+crossSmallSidePx = round(r.crossSmallSideDeg*r.pixPerDeg); %Horizontal size in Px of the initial cross
+crossLargeSidePx = round(r.crossLargeSideDeg*r.pixPerDeg); %Vertical size in Px of the initial cross
+
+%Create a square around the initial cross
+cross = backgroundCol*ones(crossLargeSidePx, crossLargeSidePx);
+
+% Draw the vertical white wing of the cross on the stimulus matrix
+cross(1:size(cross,2), size(cross,1)/2-crossSmallSidePx/2:size(cross,1)/2+crossSmallSidePx/2-1) = 1;
+
+%Draw the horizontal white wing of the cross on the stimulus matrix
+cross(size(cross,2)/2-crossSmallSidePx/2:size(cross,2)/2+crossSmallSidePx/2-1, 1:size(cross,1)) = 1;
+
+yCoordSupCross   =round(winRect(4)/2-size(cross,1)/2);%coordinate Y of the TOP of the cross
+yCoordInfCross   =round(winRect(4)/2+size(cross,1)/2);%coordinate Y of the BOTTOM of the cross
+xCoordLeftCross  =round(winRect(3)/2-size(cross,2)/2);%coordinate X of the LEFT of the cross
+xCoordRightCross =round(winRect(3)/2+size(cross,2)/2);%coordinate X of the RIGHT of the cross
+
+% Load the fixation target for the experiment
+stim = imread([cd '/stimulus_complete.png']); % read image of stimulus [canvia-ho per llegir l'est�mul que vulguis]
+stimTex = Screen('MakeTexture', window, stim); % make the texture of the stimulus
+
+
+%% STEP 7 Get the center of the stimulus (black cross) for both the right and left eyes: baseline convergence position
+eye = {'ULL DRET','ULL ESQUERRE'};
+bufferE1 = [0,1];  bufferE2 = [1,0];
+vCoord = [xCoordLeftCross, yCoordSupCross, xCoordRightCross, yCoordInfCross; xCoordLeftCross, yCoordSupCross, xCoordRightCross, yCoordInfCross]; % first row are coordinates of the stimulus for right eye, second row for left eye
+
+for i = 1:2 % start centering the cross of the right eye
+    textToObserver=sprintf('CENTRATGE %s\\nApreta les fletxes del teclat per moure \\nla creu de la pantalla fins a sobreposar-la a l altra.\\nApreta ALGUNA FLETXA per comen�ar \\ni ESPAI quan hagis acabat.',eye{i}); % write some instructions on the screen
+    Screen('SelectStereoDrawBuffer', window, bufferE2(i)); % draw EYE 1 stimulus (buffer=0 LEFT EYE, buffer=1 RIGHT EYE)
+    DrawFormattedText(window, textToObserver, 'center', winRect(4)/2,1,[],1,[],1.5); % put text on screen
+    Screen(window, 'Flip'); % show the prepared screen
+    
+    KbReleaseWait; % wait until subject releases button
+    [~,~, keyCode] = KbCheck; % read keyboard wait for spaceKey
+    while ~(keyCode(upArrow) || keyCode(downArrow) || keyCode(leftArrow) || keyCode(rightArrow))% keep checking until user presses a valid response
+        [~,~, keyCode ] = KbCheck; % did user respond yet?
+    end
+    % The subject has initiated the centering procedure
+    equal = false;
+    while ~equal
+        Screen('SelectStereoDrawBuffer', window, bufferE1(i)); % draw EYE 1 stimulus (buffer=0 LEFT EYE, buffer=1 RIGHT EYE)
+        texE1 = Screen('MakeTexture', window, backgroundCol*ones(crossLargeSidePx,crossLargeSidePx)); % black screen (without cross)
+        Screen('DrawTexture', window, texE1); % Writes the Stimulus to the window
+        
+        Screen('SelectStereoDrawBuffer', window , bufferE2(i)); % draw EYE 2 stimulus (buffer=0 LEFT EYE, buffer=1 RIGHT EYE)
+        texE2 = Screen('MakeTexture', window, cross); % stimulus with cross
+        Screen('DrawTexture', window, texE2, [], vCoord(i,:)); % Writes the Stimulus to the window
+        Screen('DrawingFinished', window);% Tell PTB drawing is finished for this frame
+        Screen('Flip', window);% show the prepared screen
+        KbWait; % wait until subject releases button
+        [~,~, keyCode] = KbCheck; % read keyboard
+        while ~(keyCode(upArrow) || keyCode(downArrow) || keyCode(leftArrow) || keyCode(rightArrow) || keyCode(escapeKey) || keyCode(spaceKey))  % keep checking until user presses a valid response
+            [~,~, keyCode] = KbCheck; % did user respond yet?
+        end
+        if keyCode(spaceKey)      % balance is found
+            equal = true;
+            r.crossPositionRE = vCoord(1,:);
+            r.crossPositionLE = vCoord(2,:);
+            break;
+        elseif keyCode(upArrow)   % move upwards
+            vCoord(i,:) = vCoord(i,:)+[0,-1,0,-1];
+        elseif keyCode(downArrow) % move downwards
+            vCoord(i,:) = vCoord(i,:)+[0,1,0,1];
+        elseif keyCode(rightArrow)% move rightwards
+            vCoord(i,:) = vCoord(i,:)+[-1,0,-1,0];
+        elseif keyCode(leftArrow) % move leftwards
+            vCoord(i,:) = vCoord(i,:)+[1,0,1,0];
+        elseif keyCode(escapeKey) % user aborts the centering phase
+            break;
+        end
+    end
+end
+
+%% STEP 8 Eyelink initiation
+    if testEyelink
+    dummymode=0;
+    end
+    % Eyelink initialization
+    if (Eyelink('initialize') ~= 0) % initialization of the connection with Eyelink
+        return;
+    end
+    % Provide Eyelink with details about the graphics environment
+    % and perform some initializations. The information is returned
+    % in a structure that also contains useful defaults
+    % and control codes (e.g. tracker state bit and Eyelink key values).
+    el = EyelinkInitDefaults(window);
+    
+    % Initialization of the connection with the Eyelink Gazetracker.
+    % exit program if this fails.
+    if ~EyelinkInit(dummymode)
+        fprintf('Eyelink Init aborted.\n');
+        cleanup;
+        return;
+    end
+    
+    % open file to record data to
+    i = Eyelink('Openfile', edfFile);
+    if i~=0
+        fprintf('Cannot create EDF file ''%s'' ', edfFile);
+        Eyelink( 'Shutdown');
+        Screen('CloseAll');
+        return;
+    end
+    
+    status1 = Eyelink('command', 'add_file_preamble_text ''Measurement of Fusional vergence - Step increments''');
+    fprintf('status1:%d\n', status1);
+    
+    % set the EDF file contents
+    Eyelink('command', 'link_sample_data = LEFT, RIGHT, GAZE, HREF, GAZERES, AREA, HTARGET, STATUS, MESSAGE, BUTTON, INPUT');
+    Eyelink('command', 'file_sample_data = LEFT, RIGHT, GAZE, HREF, GAZERES, AREA, HTARGET, STATUS, MESSAGE, BUTTON, INPUT');
+    
+    Eyelink('command', 'file_event_filter = LEFT, RIGHT, FIXATION, SACCADE, BLINK, MESSAGE, BUTTON, INPUT');
+    Eyelink('command', 'link_event_filter = LEFT, RIGHT, FIXATION, SACCADE, BLINK, MESSAGE, BUTTON, INPUT');
+    
+    % set the screen distance and resolution
+    Eyelink('command','screen_distance = 405 485');% mm
+    Eyelink('command','screen_pixel_coords = %ld %ld %ld %ld', 0, 0, winRect(3)-1, winRect(4)-1); %sets the gaze/position coordinate system, which is used for all calibratio target locations and drawing commands.
+    
+    % Set calibration type and Eyelink configuration
+    Eyelink('command', 'binocular_enabled = YES'); % binocular tracking
+    Eyelink('command', 'calibration_type = HV9');
+    Eyelink('command', 'generate_default_targets = YES');
+    Eyelink('command', 'randomize_calibration_order = NO');
+    Eyelink('command', 'randomize_validation_order = NO');
+    Eyelink('command', 'select_eye_after_validation = NO');
+    
+    % Cognitive configuration: less sensitive to noise and ignores most
+    % saccades smaller than 0.6 deg
+    Eyelink('command', 'recording_parse_type = GAZE');
+    Eyelink('command', 'saccade_velocity_threshold = 30');
+    Eyelink('command', 'saccade_acceleration_threshold = 8000');
+    Eyelink('command', 'saccade_motion_threshold = 0.1');
+    Eyelink('command', 'saccade_pursuit_fixup = 60');
+    Eyelink('command', 'saccade_update_interval = 0');
+
+    % make sure we're still connected
+    if Eyelink('IsConnected') ~= 1 && dummymode == 0
+        fprintf('not connected, clean up\n');
+        Eyelink( 'Shutdown');
+        Screen('CloseAll');
+        return;
+    end
+    
+    %% STEP 9 Calibraction simulus parameters
+    % Eyelink calibration
+     % set the calibration stimulus' parameters
+    % select left eye buffer
+    Screen('SelectStereoDrawBuffer', window, 0);
+    el.backgroundcolour = GrayIndex(window); %[128 128 128];
+    el.calibrationtargetcolour = BlackIndex(window); %[0 0 0];
+    % select right eye buffer
+    Screen('SelectStereoDrawBuffer', window, 1);
+    el.backgroundcolour = GrayIndex(window); %[128 128 128];
+    el.calibrationtargetcolour = BlackIndex(window); %[0 0 0];
+
+    % beep parameters are in frequency, volume, and duration
+    % set the second value to 0 to turn off the sound
+    el.cal_target_beep=[600 0.5 0.05];
+    el.drift_correction_target_beep=[600 0.5 0.05];
+    el.calibration_failed_beep=[400 0.5 0.25];
+    el.calibration_success_beep=[800 0.5 0.25];
+    el.drift_correction_failed_beep=[400 1 0.5];
+    el.drift_correction_success_beep=[800 0 0.25];
+
+    EyelinkUpdateDefaults(el); % update the changes in the parameters
+
+    % Hide the mouse cursor;
+%     Screen('HideCursor', window); 
+
+    EyelinkDoTrackerSetup(el); % calibration & validation
+    fprintf('calibration done\n')
+    
+    EyelinkDoDriftCorrection(el);
+    
+%% STEP 10 Measuring EXPERIMENT
+    % Now starts running the trials of the experiment
+    % DEMO
+    image_demo = imread('estimul_fletxa.png');
+    image = imread('estimul.png');
+    
+    % Get the size of the image
+    [s1_demo, s2_demo, s3_demo] = size(image_demo);
+    [s1, s2, s3] = size(image);
+    
+    % Check if the image is too big to fit on the screen and abort if it is
+    if s1_demo > screenYpixels || s2_demo > screenXpixels 
+        disp('ERROR! Demo image is too big to fit on the screen');
+        sca;
+        return;
+    end
+    
+    if s1 > screenYpixels || s2 > screenXpixels 
+        disp('ERROR! Image is too big to fit on the screen');
+        sca;
+        return;
+    end
+    
+    % Make the image into a texture
+    imageTexture_demo = Screen('MakeTexture', window, image_demo);
+    imageTexture = Screen('MakeTexture', window, image);
+    
+    % Draw the image to the screen
+    Screen('SelectStereoDrawBuffer', window, 1); %Ull dret
+    Screen('DrawTexture', window, imageTexture_demo, [], [], 0);
+    
+    Screen('SelectStereoDrawBuffer', window, 0); %Ull esquerra
+    Screen('DrawTexture', window, imageTexture_demo, [], [], 0);
+    Screen('DrawingFinished', window);
+    
+    % Flip to the screen
+    Screen('Flip', window);
+    
+    WaitSecs(2);
+    
+    % STIMULUS
+    % Draw the image to the screen
+    Screen('SelectStereoDrawBuffer', window, 1); %Ull dret
+    Screen('DrawTexture', window, imageTexture, [], [], 0);
+    
+    Screen('SelectStereoDrawBuffer', window, 0); %Ull esquerra
+    Screen('DrawTexture', window, imageTexture, [], [], 0);
+    Screen('DrawingFinished', window);
+    
+    % Flip to the screen
+    Screen('Flip', window);
+    
+    % Start the sequence of occlusions
+    m = 1;
+    for set = 1:numRep
+        % ---------------------- BINO -----------------------------------
+        Eyelink('Message', '!V TRIAL_VAR numRep %d', numRep) 
+        Eyelink('Message', 'TRIALID %d', m);
+        WaitSecs(0.001)
+        
+        % This supplies the title at the bottom of the eyetracker display
+        Eyelink('command', 'record_status_message "TRIAL %d/%d"', m, 4*numRep); 
+         
+        % Before recording, we place reference graphics on the host display
+        % Must be offline to draw to EyeLink screen
+        Eyelink('Command', 'set_idle_mode');
+        
+        % clear tracker display and draw box at center
+        Eyelink('Command', 'clear_screen 0')
+        Eyelink('command', 'draw_box %d %d %d %d 15', screenXpixels/2-50, screenYpixels/2-50, screenXpixels/2+50, screenYpixels/2+50);
+        
+        Eyelink('Message', '!V TRIAL_VAR seq %s','B')
+        
+        Eyelink('StartRecording');    
+        % record a few samples before we actually start displaying otherwise you may lose a few msec of data 
+        WaitSecs(0.1);
+        
+        Eyelink('Message', 'SYNCTIME'); % write out a message to indicate the time of the occlusion onset
+        
+        WaitSecs(occ);
+        
+        Eyelink('StopRecording');
+        WaitSecs(0.001);               
+        Eyelink('Message', 'TRIAL_RESULT')
+        
+        if keyCode (spaceKey)
+            m=m+1;
+            break;
+        end
+        % ---------------------- LE OCCLUDED -----------------------------------
+        Eyelink('Message', 'TRIALID %d', m);
+        WaitSecs(0.001)
+        Eyelink('command', 'record_status_message "TRIAL %d/%d"', m, 4*numRep); 
+        Eyelink('Command', 'set_idle_mode');
+        Eyelink('Command', 'clear_screen 0')
+        Eyelink('command', 'draw_box %d %d %d %d 15', screenXpixels/2-50, screenYpixels/2-50, screenXpixels/2+50, screenYpixels/2+50);       
+        Eyelink('Message', '!V TRIAL_VAR seq %s','RE')
+       
+        Eyelink('StartRecording');    
+        WaitSecs(0.1);     
+        Eyelink('Message', 'SYNCTIME'); % write out a message to indicate the time of the occlusion onset      
+        WaitSecs(occ);       
+        Eyelink('StopRecording');
+        WaitSecs(0.001);               
+        Eyelink('Message', 'TRIAL_RESULT')
+        
+        if keyCode (spaceKey)
+            m=m+1;
+            break;
+        end
+        % ---------------------- BINO -----------------------------------
+        Eyelink('Message', 'TRIALID %d', m);
+        WaitSecs(0.001)
+        Eyelink('command', 'record_status_message "TRIAL %d/%d"', m, 4*numRep); 
+        Eyelink('Command', 'set_idle_mode');
+        Eyelink('Command', 'clear_screen 0');
+        Eyelink('command', 'draw_box %d %d %d %d 15', screenXpixels/2-50, screenYpixels/2-50, screenXpixels/2+50, screenYpixels/2+50);       
+        Eyelink('Message', '!V TRIAL_VAR seq %s','B');
+       
+        Eyelink('StartRecording');    
+        WaitSecs(0.1);      
+        Eyelink('Message', 'SYNCTIME'); % write out a message to indicate the time of the occlusion onset      
+        WaitSecs(occ);       
+        Eyelink('StopRecording');
+        WaitSecs(0.001);               
+        Eyelink('Message', 'TRIAL_RESULT');
+ 
+        if keyCode (spaceKey)
+            m=m+1;
+            break;
+        end
+        % ---------------------- RE OCCLUDED -----------------------------------
+        Eyelink('Message', 'TRIALID %d', m);
+        WaitSecs(0.001)
+        Eyelink('command', 'record_status_message "TRIAL %d/%d"', m, 4*numRep); 
+        Eyelink('Command', 'set_idle_mode');
+        Eyelink('Command', 'clear_screen 0');
+        Eyelink('command', 'draw_box %d %d %d %d 15', screenXpixels/2-50, screenYpixels/2-50, screenXpixels/2+50, screenYpixels/2+50);       
+        Eyelink('Message', '!V TRIAL_VAR seq %s','LE');
+       
+        Eyelink('StartRecording');    
+        WaitSecs(0.1);    
+        Eyelink('Message', 'SYNCTIME'); % write out a message to indicate the time of the occlusion onset      
+        WaitSecs(occ);       
+        Eyelink('StopRecording');
+        WaitSecs(0.001);               
+        Eyelink('Message', 'TRIAL_RESULT');
+     
+        if keyCode (spaceKey)
+            m=m+1;
+            break;
+       end
+    end
+   
+    %% STEP 11 End experiment
+    % End of experiment; close the file first, close data file and shut down tracker
+    
+    Eyelink('Command', 'set_idle_mode');
+    WaitSecs(0.5);
+    Eyelink('CloseFile');
+    
+    % Download data file
+    try
+        fprintf('Receiving data file ''%s''\n', edfFile );
+        status = Eyelink('ReceiveFile');
+        if status > 0
+            fprintf('ReceiveFile status %d\n', status);
+        end
+        if 2 == exist(edfFile, 'file')
+            fprintf('Data file ''%s'' can be found in ''%s''\n', edfFile, pwd );
+        end
+    catch
+        fprintf('Problem receiving data file ''%s''\n', edfFile );
+    end
+    
+    %% STEP 12 Close all
+    % Close the eye tracker, the PTB window, 
+    Eyelink('ShutDown');
+    Screen('CloseAll');
+    ShowCursor;
+   
+   try
+   catch % This catch section executes in case of an error in the try section above
+        Eyelink('ShutDown');
+        Screen('CloseAll');
+        ShowCursor;
+   end
